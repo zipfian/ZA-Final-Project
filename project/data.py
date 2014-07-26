@@ -1,160 +1,186 @@
 # -*- coding: utf-8 -*-
+import pandas as pd
 import twitter
 import time
-from cache import get_cache, make_cache
 
-def get_user_info(api, user_id=None, screen_name=None):
-    '''
-    api: twitter.Api oauth login object
-    user_id: twitter user id as integer (Optional)
-    screen_name: twitter screen name as string (Optional)
+URLS = ('url', 'urls')
+FOLLOWERS_CAP = 50000
+FOLLOWING_CAP = 50000
 
-    return: twitter.user object
-    '''
+API_CALLS = {'list': 'GetListsList',
+             'following': 'GetFriendIDs',
+             'followers':'GetFollowerIDs',
+             'tweets': 'GetUserTimeline',
+             'info': 'GetUser',
+             }
+
+API_ARGS = {'list': {},
+            'following': {},
+            'followers': {},
+            'tweets': {'count': 200, 'trim_user': True},
+            'info': {},
+            }
+
+
+def __traverse(in_dict, lookup):
+
+    d = in_dict.copy()
+
+    for k, v in d.iteritems():
+
+        if k in lookup and type(v) == dict:
+            d[k] = d[k].items()
+
+        elif type(v) == dict:
+            d[k] = __traverse(v, lookup)
+
+    return d
+
+
+def __get_cache(db, followers):
+
+    result = {}
+
+    curs = db.data.find({'id': {'$in': followers}})
+
+    for data in curs:
+
+        uid = data['id']
+
+        dtype = data['type']
+
+        if uid not in result:
+            result[uid] = {}
+
+        result[uid][dtype] = data['data']
+
+    curs.close()
+
+    return result
+
+
+def __get_cache_for_user(db, user_id, cache_type):
 
     if user_id:
-        user_info = get_cache(user_id, 'info', 'json')
+        coll = db.data
+        tmp = coll.find_one({'id': user_id, 'type': cache_type})
+        if tmp:
+            return tmp['data']
+    return None
 
-        if user_info == None:
-            user_info = api.GetUser(user_id=user_id).AsDict()
-            make_cache(user_info, user_info['id'], 'info', 'json')
 
+def __make_cache_for_user(db, data, user_id, cache_type):
+
+    coll = db.data
+    coll.update({'id': user_id, 'type': cache_type},
+                {'$set': {'data': data}},
+                upsert = True)
+
+
+def get_user_data_by_type(db, api, screen_name=None,
+                          user_id=None, data_type=None, force=False):
+
+    if force:
+        data = None
     else:
-        user_info = api.GetUser(screen_name=screen_name).AsDict()
-        make_cache(user_info, user_info['id'], 'info', 'json')
+        data = __get_cache_for_user(db, user_id, data_type)
 
-    return user_info
+    if data == None:
 
+        data = eval('api.' + API_CALLS[data_type] + \
+                    '(screen_name=screen_name, user_id=user_id, ' + \
+                    '**API_ARGS[data_type])')
 
-def get_user_tweets(api, user_id):
-    '''
-    api: twitter.Api oauth login object
-    user_id: twitter user id as integer
+        if data_type == 'list':
+            data = [__traverse(x.AsDict(), URLS) for x in data]
 
-    return: List of integer ids following the user_id
-    '''
-    tweets = get_cache(user_id, 'tweets', 'jsonlist')
+        elif data_type == 'tweets':
+            data = [__traverse(x.AsDict(), URLS) for x in data]
 
-    if tweets == None:
-        tweets = api.GetUserTimeline(user_id = user_id,
-                                     count = 200,
-                                     trim_user = True)
-        tweets = [tweet.AsDict() for tweet in tweets]
-        make_cache(tweets, user_id, 'tweets', 'jsonlist')
+        elif data_type == 'info':
+            data = __traverse(data.AsDict(), URLS)
 
-    return tweets
+        __make_cache_for_user(db, data, user_id, data_type)
+
+    return data
 
 
-def get_user_followers(api, user_id):
-    '''
-    api: twitter.Api oauth login object
-    user_id: twitter user id as integer
-
-    return: List of integer ids following the user_id
-    '''
-
-    followers = get_cache(user_id, 'followers', 'csv')
-
-    if followers == None:
-        followers = api.GetFollowerIDs(user_id = user_id)
-        make_cache(followers, user_id, 'followers', 'csv')
-
-    return followers
-
-
-def get_user_following(api, user_id):
-    '''
-    api: twitter.Api oauth login object
-    user_id: twitter user id as integer
-
-    return: List of integer ids following the user_id
-    '''
-
-    following = get_cache(user_id, 'following', 'csv')
-
-    if following == None:
-        following = api.GetFriendIDs(user_id = user_id)
-        make_cache(following, user_id, 'following', 'csv')
-
-    return following
-
-
-def get_user_lists(api, user_id=None, screen_name=None):
-    '''
-    api: twitter.Api oauth login object
-    user_id: twitter user id as integer (Optional)
-    screen_name: twitter screen name as string (Optional)
-
-    return: twitter.user object
-    '''
-
-    user_lists = get_cache(user_id, 'list', 'jsonlist')
-
-    if user_lists == None:
-        user_lists = api.GetListsList(None, user_id=user_id)
-        user_lists = [ulist.AsDict() for ulist in user_lists]
-        make_cache(user_lists, user_id, 'list', 'jsonlist')
-
-    return user_lists
-
-
-def get_user_data(api, screen_name=None, user_id=None, ctr=0):
+def get_user_data(db, api, name=None, uid=None, ctr=0, force=False):
 
     try:
+        target = get_user_data_by_type(db, api, screen_name=name,
+                                       user_id=uid, data_type='info',
+                                       force=force)
 
-        target = get_user_info(api, screen_name=screen_name, user_id=user_id)
-        tweets = get_user_tweets(api, user_id=target['id'])
-        followers = get_user_followers(api, user_id=target['id'])
-        following = get_user_following(api, user_id=target['id'])
-        user_lists = get_user_lists(api, user_id=target['id'])
+        if 'followers_count' in target:
+            if target['followers_count'] > FOLLOWERS_CAP:
+                return None
+
+        if 'friends_count' in target:
+            if target['friends_count'] > FOLLOWING_CAP:
+                return None
+
+        tweets = get_user_data_by_type(db, api, user_id=target['id'],
+                                       data_type='tweets', force=force)
+
+        user_lists = get_user_data_by_type(db, api, user_id=target['id'],
+                                           data_type='list', force=force)
+
+        followers = get_user_data_by_type(db, api, user_id=target['id'],
+                                          data_type='followers', force=force)
+
+        following = get_user_data_by_type(db, api, user_id=target['id'],
+                                          data_type='following', force=force)
+
         return target, tweets, followers, following, user_lists
 
     except (twitter.error.TwitterError, twitter.TwitterError) as err:
+
         if str(err)[0:3] == 'Not' or ctr > 15:
-            print 'User is protected:', user_id
+            print 'User is protected:', uid
 
         elif '63' in str(err):
-            print 'User has been suspended:', user_id
+            print 'User has been suspended:', uid
 
         elif '88' in str(err):
-            print 'Rate Limit reached on:', user_id
-            ctr += 1
+            print 'Rate Limit reached on:', uid
             time.sleep(60)
-            return get_user_data(api,
-                                 screen_name = screen_name,
-                                 user_id = user_id,
-                                 ctr = ctr)
+            return get_user_data(db, api, name = name, uid = uid, ctr = ctr+1)
+
         else:
             print err
 
         return None
 
 
-def get_follower_data(apis, followers):
-    '''
-    apis:
-    followers:
-    return:
-    '''
+def get_follower_data(db, apis, followers, force=False):
+
     num_apis = len(apis)
 
-    for ind, id in enumerate(followers):
+    num_followers = len(followers)
 
-        print ind, id
+    # Begin by doing a mass-check for cached data
+    if force:
+        result = {}
+    else:
+        result = __get_cache(db, followers)
+
+    for ind, uid in enumerate(followers):
+
+        if uid in result:
+            if len(result[uid].keys()) == 5:
+                continue
+
+        print ind + 1, 'of', num_followers, '. On id:', uid
 
         n = ind % num_apis
 
-        user_data = get_user_data(apis[n], user_id=id)
+        user_data = get_user_data(db, apis[n], uid=uid, force=force)
 
-        if user_data:
-            user, tweets, fol_followers, fol_following, fol_lists = user_data
-        else:
-            continue
+        result[uid] = user_data
 
-        #if n == 0 and ind > 4550:
-        #    print 'sleep for 30 at', ind
-        #    time.sleep(60*ind/10000)
-
-        ## PARSE THIS DATA, RETURN USABLE INFORMATION BACK AS DATAFRAME
-
-    return None
+    # transpose so that user_id are rows and columns are the fields
+    # dropna() will remove users that had protected or overly large
+    # follower/friends lists. It will NOT remove users width no tweets / no
+    # lists
+    return pd.DataFrame(data=result).transpose().dropna()
